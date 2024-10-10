@@ -1,13 +1,13 @@
 import tensorflow as tf
 import numpy as np
-import matplotlib.pyplot as plt
 from PIL import Image
 import random
 import os
 import glob
-import collections
-from tensorflow.keras.layers import *
+from tqdm import tqdm
+
 import ResNet
+
 train_data_path = r'../../../datasets/archive/omniglot/images_background'
 test_data_path = r'../../../datasets/archive/omniglot/images_evaluation'
 
@@ -183,51 +183,6 @@ for batch in train_loader.take(1):
     print("Query Labels Batch Shape:", query_labels_batch.shape)
 
 
-class MAMLModel(tf.keras.Model):
-    def __init__(self, input_shape, n_way):
-        super(MAMLModel, self).__init__()
-        self.conv1 = Conv2D(32, 3, activation="relu", padding="same", name="conv1", input_shape=input_shape)
-        self.conv2 = Conv2D(32, 3, strides=2, activation="relu", padding="same", name="conv2")
-        self.conv3 = Conv2D(64, 3, activation="relu", padding="same", name="conv3")
-        self.conv4 = Conv2D(64, 3, strides=2, activation="relu", padding="same", name="conv4")
-        self.flatten = Flatten(name="flatten")
-        self.dense1 = Dense(128, activation="relu", name="dense1")
-        self.dense2 = Dense(n_way, name="dense2")
-
-    def call(self, inputs, weights=None):
-        if weights is None:
-            x = self.conv1(inputs)
-            x = self.conv2(x)
-            x = self.conv3(x)
-            x = self.conv4(x)
-            x = self.flatten(x)
-            x = self.dense1(x)
-            x = self.dense2(x)
-        else:
-            # 使用自定义权重向前传播
-            x = tf.nn.conv2d(inputs, weights["conv1/kernel"], strides=1, padding="SAME")
-            x = tf.nn.bias_add(x, weights["conv1/bias"])
-            x = tf.nn.relu(x)
-            x = tf.nn.conv2d(x, weights["conv2/kernel"], strides=2, padding="SAME")
-            x = tf.nn.bias_add(x, weights["conv2/bias"])
-            x = tf.nn.relu(x)
-
-            x = tf.nn.conv2d(x, weights["conv3/kernel"], strides=1, padding="SAME")
-            x = tf.nn.bias_add(x, weights["conv3/bias"])
-            x = tf.nn.relu(x)
-            x = tf.nn.conv2d(x, weights["conv4/kernel"], strides=2, padding="SAME")
-            x = tf.nn.bias_add(x, weights["conv4/bias"])
-            x = tf.nn.relu(x)
-
-            x = self.flatten(x)
-            x = tf.matmul(x, weights['dense1/kernel']) + weights['dense1/bias']
-
-            x = tf.nn.relu(x)
-            x = tf.matmul(x, weights['dense2/kernel']) + weights['dense2/bias']
-
-        return x
-
-
 def get_initial_weights(model):
     weights = {}
     # 遍历模型每一层
@@ -363,12 +318,72 @@ for iteration in range(1, num_iterations + 1):
         is_train=True  # 训练模式设置为False，因为这是验证过程
     )
 
-    print(f'Epoch {iteration}, Meta Loss: {loss.numpy()}, Meta Accuracy: {acc.numpy()}')
+    # ========================= 验证模型 =====================
+    try:
+        # 从训练迭代器中获取支持集和查询集的数据
+        support_images, support_labels, query_images, query_labels = next(valid_iter)
+    except StopIteration:
+        # 如果迭代器结束，则重新创建一个训练迭代器并继续获取数据
+        valid_iter = iter(valid_loader)
+        support_images, support_labels, query_images, query_labels = next(valid_iter)
+
+    test_loss, test_acc = maml_train(
+        model,
+        support_images,  # 支持集图像
+        support_labels,  # 支持集标签
+        query_images,  # 查询集图像
+        query_labels,  # 查询集标签
+        train_inner_step,  # 内部更新步数（在支持集上进行快速调整的步数）
+        inner_lr,  # 内循环的学习率
+        optimizer,  # 优化器
+        loss_fn,  # 损失函数
+        is_train=False  # 训练模式设置为False，因为这是验证过程
+    )
+
+    print(f'Epoch {iteration}, Meta Loss: {loss.numpy()}, Meta Accuracy: {acc.numpy()}, Test Loss: {test_loss.numpy()}, Test Accuracy: {test_acc.numpy()}')
+# 保存模型
+model.save(filepath="./MAML_FSL_omniglot_model2", save_format="tf")
+
+# model.save(filepath=f"./MAML_FSL_omniglot_model.h5")
+# ====================== 评估模型 ====================
 
 
+test_acc = []
+test_loss = []
 
 
+test_bar = tqdm(test_loader, desc="Testing")
 
+for support_images, support_labels, query_images, query_labels in test_bar:
+    # 确保数据类型正确
+    support_images = tf.cast(support_images, tf.float32)
+    support_labels = tf.cast(support_labels, tf.int32)
+    query_images = tf.cast(query_images, tf.float32)
+    query_labels = tf.cast(query_labels, tf.int32)
 
+    # 在评估过程中，设置 is_train=False
+    loss, acc = maml_train(
+        model,
+        support_images,
+        support_labels,
+        query_images,
+        query_labels,
+        eval_inner_step,
+        inner_lr,
+        optimizer,
+        loss_fn,
+        is_train=False  # 评估模式，不更新模型参数
+    )
 
+    # 记录损失和准确率
+    test_loss.append(loss.numpy())
+    test_acc.append(acc)
+
+    # 更新进度条信息
+    test_bar.set_postfix(loss=loss.numpy(), acc=acc)
+
+# 计算平均损失和准确率
+test_loss = np.mean(test_loss)
+test_acc = np.mean(test_acc)
+print('Meta Test Loss: {:.3f}, Meta Test Acc: {:.2f}%'.format(test_loss, 100 * test_acc))
 
