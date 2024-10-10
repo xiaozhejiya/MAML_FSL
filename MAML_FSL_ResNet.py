@@ -8,8 +8,8 @@ from tqdm import tqdm
 
 import ResNet
 
-train_data_path = r'../../../datasets/archive/omniglot/images_background'
-test_data_path = r'../../../datasets/archive/omniglot/images_evaluation'
+train_data_path = r'./omniglot/images_background'
+test_data_path = r'./omniglot/images_evaluation'
 
 n_way = 5
 k_shot = 1
